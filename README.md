@@ -32,10 +32,6 @@ The script offers the following options:
 1. **Start or Resume Installation**: Begin a new installation or continue from where you left off
 2. **Delete Environment**: Remove all resources created by the script
 3. **Exit**: Exit the script
-   ```bash
-   kubectl get secret hcd-superuser -n <namespace> -o jsonpath='{.data.username}' | base64 -d
-   kubectl get secret hcd-superuser -n <namespace> -o jsonpath='{.data.password}' | base64 -d
-   ```
 
 ## Configuration Files
 
