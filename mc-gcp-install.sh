@@ -52,50 +52,6 @@ load_state() {
     return 1
 }
 
-# Function to check if GKE auth plugin is installed
-check_gke_auth_plugin() {
-    log "Checking for GKE auth plugin..."
-    
-    if command_exists gke-gcloud-auth-plugin; then
-        log "GKE auth plugin is installed."
-        return 0
-    else
-        warning "GKE auth plugin is not installed. This is required for kubectl to work with GKE."
-        read -p "Would you like to install the GKE auth plugin now? (y/n): " INSTALL_PLUGIN
-        
-        if [[ "$INSTALL_PLUGIN" == "y" || "$INSTALL_PLUGIN" == "Y" ]]; then
-            log "Installing GKE auth plugin..."
-            gcloud components install gke-gcloud-auth-plugin
-            
-            if ! command_exists gke-gcloud-auth-plugin; then
-                error "Failed to install GKE auth plugin. Please install it manually: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin"
-            fi
-            
-            log "GKE auth plugin installed successfully."
-            
-            # Configure kubectl to use the plugin
-            log "Configuring kubectl to use the GKE auth plugin..."
-            export USE_GKE_GCLOUD_AUTH_PLUGIN=True
-            
-            # Add to bash profile if it doesn't exist
-            if ! grep -q "USE_GKE_GCLOUD_AUTH_PLUGIN=True" ~/.bash_profile 2>/dev/null; then
-                echo 'export USE_GKE_GCLOUD_AUTH_PLUGIN=True' >> ~/.bash_profile
-                log "Added USE_GKE_GCLOUD_AUTH_PLUGIN=True to ~/.bash_profile"
-            fi
-            
-            # Add to zsh profile if it exists
-            if [ -f ~/.zshrc ] && ! grep -q "USE_GKE_GCLOUD_AUTH_PLUGIN=True" ~/.zshrc; then
-                echo 'export USE_GKE_GCLOUD_AUTH_PLUGIN=True' >> ~/.zshrc
-                log "Added USE_GKE_GCLOUD_AUTH_PLUGIN=True to ~/.zshrc"
-            fi
-            
-            return 0
-        else
-            error "GKE auth plugin is required for this script to work. Please install it manually: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin"
-        fi
-    fi
-}
-
 # Check prerequisites
 check_prerequisites() {
     log "Checking prerequisites..."
@@ -819,7 +775,7 @@ install_mission_control() {
     if [[ "$HAS_LICENSE" == "y" || "$HAS_LICENSE" == "Y" ]]; then
         read -p "Enter the path to your license file: " LICENSE_PATH
         if [ -f "$LICENSE_PATH" ]; then
-            LICENSE_FLAG="--license-file=$LICENSE_PATH"
+LICENSE_FLAG="--license-file=$LICENSE_PATH"
             log "Using license file: $LICENSE_PATH"
         else
             warning "License file not found: $LICENSE_PATH"
@@ -919,6 +875,248 @@ install_mission_control() {
     echo "MC_NAMESPACE=$MC_NAMESPACE" >> $CONFIG_FILE
     
     save_state "mission_control_installed"
+}
+
+# Install HCD Cluster
+install_hcd_cluster() {
+    log "Installing HCD Cluster using Mission Control..."
+    
+    # Make sure environment variable is set for GKE auth plugin
+    export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+    
+    log "IMPORTANT: Before continuing, you must have:"
+    log "1. Completed Mission Control installation"
+    log "2. Created a project in the Mission Control UI"
+    log "3. Noted the Project Slug from the UI or from the namespace list"
+    read -p "Have you completed these steps? (y/n): " PREREQS_DONE
+    
+    if [[ "$PREREQS_DONE" != "y" && "$PREREQS_DONE" != "Y" ]]; then
+        log "Please complete the prerequisites first:"
+        log "1. Access Mission Control UI and log in"
+        log "2. Click '+New Project' and create a project"
+        log "3. Note the Project Slug value shown in the UI"
+        log "4. Run this script again and select option 2"
+        return 1
+    fi
+    
+    # List available namespaces to find project slug
+    log "Available namespaces (look for your project slug - it usually starts with 'opscenter-'):"
+    kubectl get namespaces
+    
+    # Ask for the project namespace
+    read -p "Enter your project namespace/slug: " PROJECT_NAMESPACE
+    
+    if [ -z "$PROJECT_NAMESPACE" ]; then
+        error "Project namespace cannot be empty. Please try again."
+    fi
+    
+    # Check if the provided namespace exists
+    if ! kubectl get namespace "$PROJECT_NAMESPACE" &>/dev/null; then
+        error "Namespace $PROJECT_NAMESPACE does not exist. Please check the namespace name and try again."
+    fi
+    
+    log "Using project namespace: $PROJECT_NAMESPACE"
+    
+    # Prompt for HCD cluster name
+    log "Enter a name for your HCD cluster (default: hcd):"
+    read -p "HCD Cluster Name: " HCD_NAME
+    HCD_NAME=${HCD_NAME:-hcd}
+    
+    # Before creating the HCD cluster YAML
+    log "We need to add labels to nodes for HCD to schedule properly..."
+    add_hcd_node_labels
+
+    # Create HCD cluster YAML file
+    log "Creating HCD cluster configuration..."
+    
+    cat > hcd-mission-control-cluster.yaml << EOF
+apiVersion: missioncontrol.datastax.com/v1beta2
+kind: MissionControlCluster
+metadata:
+  name: ${HCD_NAME}
+  namespace: ${PROJECT_NAMESPACE}
+spec:
+  dataApi:
+      enabled: true
+      port: 8181
+  createIssuer: true
+  encryption:
+    internodeEncryption:
+      certs:
+        certTemplate:
+          issuerRef:
+            name: ""
+          secretName: ""
+        createCerts: true
+      enabled: true
+    managementApiAuthEncryption:
+      certs:
+        certTemplate:
+          issuerRef:
+            name: ""
+          secretName: ""
+        createCerts: true
+      enabled: true
+  k8ssandra:
+    auth: true
+    cassandra:
+      containers:
+      - env:
+        - name: DSE_AUTO_CONF_OFF
+          value: all
+        - name: DSE_MGMT_EXPLICIT_START
+          value: "true"
+        name: cassandra
+        resources: {}
+      datacenters:
+      - datacenterName: gcp
+        metadata:
+          name: ${HCD_NAME}-gcp
+          pods: {}
+          services:
+            additionalSeedService: {}
+            allPodsService: {}
+            dcService: {}
+            nodePortService: {}
+            seedService: {}
+        perNodeConfigInitContainerImage: mikefarah/yq:4
+        perNodeConfigMapRef: {}
+        racks:
+        - name: rack1
+          nodeAffinityLabels:
+            mission-control.datastax.com/role: database
+        - name: rack2
+          nodeAffinityLabels:
+            mission-control.datastax.com/role: database
+        - name: rack3
+          nodeAffinityLabels:
+            mission-control.datastax.com/role: database
+        size: 3
+        stopped: false
+        storageConfig:
+          cassandraDataVolumeClaimSpec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Ti
+            storageClassName: premium-rwo
+      metadata:
+        pods: {}
+        services:
+          additionalSeedService: {}
+          allPodsService: {}
+          dcService: {}
+          nodePortService: {}
+          seedService: {}
+      networking:
+        hostNetwork: false
+      perNodeConfigInitContainerImage: mikefarah/yq:4
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+      serverType: hcd
+      serverVersion: 1.1.0
+      superuserSecretRef: {}
+    secretsProvider: internal
+EOF
+    
+    # Apply the HCD cluster configuration
+    log "Applying HCD cluster configuration..."
+    kubectl apply -f hcd-mission-control-cluster.yaml
+    
+    if [ $? -ne 0 ]; then
+        warning "Failed to apply HCD cluster configuration."
+        read -p "Would you like to retry? (y/n): " RETRY_HCD
+        if [[ "$RETRY_HCD" == "y" || "$RETRY_HCD" == "Y" ]]; then
+            kubectl apply -f hcd-mission-control-cluster.yaml
+            if [ $? -ne 0 ]; then
+                error "Failed to apply HCD cluster configuration after retry."
+            fi
+        else
+            error "Cannot continue without HCD cluster."
+        fi
+    fi
+    
+    # Wait for HCD cluster to be ready
+    log "Cluster creation initiated. The HCD cluster will be created in the Mission Control UI."
+    log "This process may take several minutes to complete."
+    log "You can check the status in the Mission Control UI or with:"
+    log "kubectl get pods -n $PROJECT_NAMESPACE"
+    
+    # Save the namespace for future reference
+    echo "PROJECT_NAMESPACE=$PROJECT_NAMESPACE" >> $CONFIG_FILE
+    echo "HCD_NAME=$HCD_NAME" >> $CONFIG_FILE
+    
+    # Ask if user wants to wait and check status
+    read -p "Would you like to check the status of the pods? (y/n): " CHECK_STATUS
+    if [[ "$CHECK_STATUS" == "y" || "$CHECK_STATUS" == "Y" ]]; then
+        log "Checking pods in namespace $PROJECT_NAMESPACE:"
+        kubectl get pods -n $PROJECT_NAMESPACE
+    fi
+    
+    log "HCD Cluster creation has been initiated. You can monitor the progress in the Mission Control UI."
+    log "Once the cluster is ready, you can access the Data API at port 8181."
+    
+    save_state "hcd_cluster_initiated"
+}
+
+# Add necessary labels to nodes for HCD Cluster
+add_hcd_node_labels() {
+    log "Adding necessary labels to nodes for HCD Cluster..."
+    
+    # List all nodes
+    log "Available nodes in the cluster:"
+    kubectl get nodes
+    
+    # Get all worker nodes (excluding control planes if any)
+    WORKER_NODES=$(kubectl get nodes --no-headers | grep -v "control-plane" | awk '{print $1}')
+    
+    if [ -z "$WORKER_NODES" ]; then
+        # If no nodes were excluded with the control-plane filter, use all nodes
+        WORKER_NODES=$(kubectl get nodes --no-headers | awk '{print $1}')
+    fi
+    
+    # Ask which nodes to label
+    log "By default, all worker nodes will be labeled for HCD. Would you like to:"
+    echo "1. Label all worker nodes (recommended)"
+    echo "2. Specify which nodes to label"
+    read -p "Enter your choice [1-2]: " LABEL_CHOICE
+    
+    if [[ "$LABEL_CHOICE" == "2" ]]; then
+        log "Enter the node names to label (comma-separated):"
+        read -p "Nodes: " NODES_TO_LABEL
+        IFS=',' read -ra NODE_ARRAY <<< "$NODES_TO_LABEL"
+    else
+        IFS=$'\n' read -rd '' -a NODE_ARRAY <<< "$WORKER_NODES"
+    fi
+    
+    # Add label to selected nodes
+    for node in "${NODE_ARRAY[@]}"; do
+        node=$(echo "$node" | tr -d '[:space:]')
+        log "Adding label to node: $node"
+        kubectl label node "$node" mission-control.datastax.com/role=database --overwrite
+        
+        if [ $? -ne 0 ]; then
+            warning "Failed to add label to node $node. This might cause scheduling issues."
+        else
+            log "Successfully labeled node $node"
+        fi
+    done
+    
+    # Verify labels
+    log "Verifying node labels..."
+    kubectl get nodes -L mission-control.datastax.com/role
+    
+    # Check how many nodes were labeled
+    LABELED_COUNT=$(kubectl get nodes -l mission-control.datastax.com/role=database --no-headers | wc -l)
+    log "Total nodes labeled for HCD: $LABELED_COUNT"
+    
+    if [ "$LABELED_COUNT" -lt 3 ]; then
+        warning "You have labeled fewer than 3 nodes for HCD. The HCD cluster requires at least 3 nodes."
+        warning "Make sure you have enough labeled nodes for your 3-rack configuration."
+    fi
 }
 
 # Create LoadBalancer service for Mission Control UI
@@ -1052,6 +1250,8 @@ delete_environment() {
     
     echo -e "\n${RED}WARNING: This will delete all resources created by this script, including:${NC}"
     echo -e "- GKE cluster: ${YELLOW}${PREFIX}-mc-control-plane${NC}"
+    echo -e "- Mission Control installation in namespace: ${YELLOW}${MC_NAMESPACE:-mission-control}${NC}"
+    echo -e "- HCD Cassandra cluster (if installed)"
     echo -e "- All associated resources in project: ${YELLOW}${GCP_PROJECT}${NC}"
     echo -e "\n${RED}This action is irreversible!${NC}"
     
@@ -1060,6 +1260,16 @@ delete_environment() {
     if [ "$CONFIRM_DELETE" != "DELETE" ]; then
         log "Deletion cancelled."
         return
+    fi
+    
+    # If HCD cluster was installed, try to delete it first
+    if [ -f "$CONFIG_FILE" ] && grep -q "HCD_NAMESPACE" "$CONFIG_FILE"; then
+        log "Attempting to delete HCD cluster first..."
+        kubectl delete -f hcd-data-api-gcp-mccluster.yaml --ignore-not-found
+        
+        # Wait for deletion to progress
+        log "Waiting for HCD resources to be deleted..."
+        sleep 30
     fi
     
     log "Deleting environment using Terraform..."
@@ -1084,6 +1294,16 @@ delete_environment() {
                 rm -f "$STATE_FILE"
                 log "Removed state file: $STATE_FILE"
             fi
+            
+            # Remove config file
+            if [ -f "$CONFIG_FILE" ]; then
+                rm -f "$CONFIG_FILE"
+                log "Removed config file: $CONFIG_FILE"
+            fi
+            
+            # Remove generated files
+            log "Cleaning up generated files..."
+            rm -f hcd-data-api-gcp-mccluster.yaml hcd-data-api-svc.yaml hcd-data-api-svc.yaml.bak mission-control-ui-external.yaml
         else
             error "Failed to delete environment. Please check the error messages above."
         fi
@@ -1120,6 +1340,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1139,6 +1365,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1157,6 +1389,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1174,6 +1412,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1190,6 +1434,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1205,6 +1455,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1219,6 +1475,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1232,6 +1494,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1244,6 +1512,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1255,6 +1529,12 @@ start_or_resume_installation() {
             log "Resuming from Mission Control installation step..."
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1264,6 +1544,23 @@ start_or_resume_installation() {
             
         "mission_control_installed")
             log "Mission Control is already installed."
+            
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
+            log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
+            read CREATE_LB
+            if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
+                create_loadbalancer
+            fi
+            ;;
+            
+        "hcd_cluster_installed")
+            log "HCD Cluster is already installed."
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1288,6 +1585,12 @@ start_or_resume_installation() {
             install_prerequisites
             install_mission_control
             
+            log "Would you like to install the HCD Cassandra cluster? (y/n)"
+            read INSTALL_HCD
+            if [[ "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+                install_hcd_cluster
+            fi
+            
             log "Would you like to create a LoadBalancer service for Mission Control UI? (y/n)"
             read CREATE_LB
             if [[ "$CREATE_LB" == "y" || "$CREATE_LB" == "Y" ]]; then
@@ -1301,24 +1604,316 @@ start_or_resume_installation() {
     log "1. To access the KOTS Admin Console again: kubectl kots admin-console --namespace mission-control"
     log "2. To reset the Admin Console password: kubectl kots reset-password -n mission-control"
     log "3. To tear down the environment: Run this script again and select 'Delete environment'"
+    
+    if [[ "$CURRENT_STATE" == "hcd_cluster_installed" || "$INSTALL_HCD" == "y" || "$INSTALL_HCD" == "Y" ]]; then
+        if [ -f "$CONFIG_FILE" ] && grep -q "HCD_USERNAME" "$CONFIG_FILE"; then
+            source "$CONFIG_FILE"
+            log "HCD Cluster Notes:"
+            log "- Access the Data API: http://localhost:8181 (after port-forwarding)"
+            log "- Port-forward command: kubectl port-forward svc/$DATA_API_SVC -n $MC_NAMESPACE 8181:8181"
+            log "- Connect to Cassandra: kubectl exec -it hcd-gcp-rack1-sts-0 -n $MC_NAMESPACE -- bash"
+            log "- Username: $HCD_USERNAME"
+            log "- Password: $HCD_PASSWORD"
+        fi
+    fi
+}
+
+# Expose Data API as LoadBalancer
+expose_data_api() {
+    log "Setting up Data API access..."
+    
+    # Get the project namespace from config or ask user
+    if [ -z "$PROJECT_NAMESPACE" ] && [ -f "$CONFIG_FILE" ] && grep -q "PROJECT_NAMESPACE" "$CONFIG_FILE"; then
+        source "$CONFIG_FILE"
+    fi
+    
+    if [ -z "$PROJECT_NAMESPACE" ]; then
+        log "Available namespaces (look for your project slug):"
+        kubectl get namespaces
+        read -p "Enter your project namespace/slug: " PROJECT_NAMESPACE
+        
+        if [ -z "$PROJECT_NAMESPACE" ]; then
+            error "Project namespace cannot be empty."
+        fi
+        
+        if ! kubectl get namespace "$PROJECT_NAMESPACE" &>/dev/null; then
+            error "Namespace $PROJECT_NAMESPACE does not exist."
+        fi
+    fi
+    
+    log "Using project namespace: $PROJECT_NAMESPACE"
+    
+    # List all services in the namespace
+    log "Services in namespace $PROJECT_NAMESPACE:"
+    kubectl get services -n $PROJECT_NAMESPACE
+    
+    # Find the Data API service
+    DATA_API_SERVICES=$(kubectl get services -n $PROJECT_NAMESPACE | grep -iE 'data-api|stargate' | awk '{print $1}')
+    
+    if [ -z "$DATA_API_SERVICES" ]; then
+        log "No Data API service found in namespace $PROJECT_NAMESPACE."
+        log "Please enter the name of the Data API service:"
+        read -p "Service name: " DATA_API_SVC
+    elif [[ $(echo "$DATA_API_SERVICES" | wc -l) -gt 1 ]]; then
+        log "Multiple potential Data API services found:"
+        echo "$DATA_API_SERVICES"
+        read -p "Enter the name of the Data API service to expose: " DATA_API_SVC
+    else
+        DATA_API_SVC=$DATA_API_SERVICES
+        log "Found Data API service: $DATA_API_SVC"
+    fi
+    
+    if [ -z "$DATA_API_SVC" ]; then
+        error "Data API service name cannot be empty."
+    fi
+    
+    # Export the service YAML
+    log "Exporting Data API service configuration..."
+    kubectl get service $DATA_API_SVC -n $PROJECT_NAMESPACE -o yaml > hcd-data-api-svc.yaml
+    
+    if [ $? -ne 0 ]; then
+        error "Failed to get service $DATA_API_SVC. Please check the service name."
+    fi
+    
+    # Modify the service type to LoadBalancer
+    log "Modifying service type from ClusterIP to LoadBalancer..."
+    sed -i'.bak' 's/type: ClusterIP/type: LoadBalancer/' hcd-data-api-svc.yaml
+    
+    # Apply the updated service
+    log "Applying updated Data API service configuration..."
+    kubectl apply -f hcd-data-api-svc.yaml
+    
+    if [ $? -ne 0 ]; then
+        error "Failed to update Data API service."
+    fi
+    
+    log "Data API service updated successfully."
+    
+    # Wait for the external IP
+    log "Waiting for LoadBalancer to be provisioned with an external IP..."
+    external_ip=""
+    timeout=300  # 5 minutes timeout
+    start_time=$(date +%s)
+    
+    while [ -z "$external_ip" ]; do
+        echo "Waiting for external IP..."
+        external_ip=$(kubectl get svc $DATA_API_SVC -n $PROJECT_NAMESPACE --template="{{range .status.loadBalancer.ingress}}{{.ip}}{{end}}" 2>/dev/null)
+        
+        # Check for timeout
+        current_time=$(date +%s)
+        elapsed=$((current_time - start_time))
+        
+        if [ $elapsed -gt $timeout ]; then
+            warning "Timed out waiting for external IP after 5 minutes."
+            warning "The LoadBalancer service has been created, but hasn't received an external IP yet."
+            warning "You can check its status later with: kubectl get svc $DATA_API_SVC -n $PROJECT_NAMESPACE"
+            break
+        fi
+        
+        [ -z "$external_ip" ] && sleep 10
+    done
+    
+    if [ -n "$external_ip" ]; then
+        log "Data API is now accessible at: http://$external_ip:8181/"
+        echo "DATA_API_SVC=$DATA_API_SVC" >> $CONFIG_FILE
+        echo "DATA_API_URL=http://$external_ip:8181" >> $CONFIG_FILE
+    fi
+    
+    # Offer to set up port forwarding
+    log "Would you like to set up port forwarding to access the Data API locally? (y/n)"
+    read SETUP_PORT_FORWARD
+    if [[ "$SETUP_PORT_FORWARD" == "y" || "$SETUP_PORT_FORWARD" == "Y" ]]; then
+        log "Starting port forwarding from localhost:8181 to the Data API service..."
+        log "Keep this terminal window open to maintain the connection."
+        log "Press Ctrl+C to stop port forwarding when done."
+        kubectl port-forward svc/$DATA_API_SVC -n $PROJECT_NAMESPACE 8181:8181
+    else
+        log "You can set up port forwarding later with:"
+        log "kubectl port-forward svc/$DATA_API_SVC -n $PROJECT_NAMESPACE 8181:8181"
+    fi
+}
+
+# Get HCD superuser credentials
+get_hcd_credentials() {
+    log "Retrieving HCD superuser credentials..."
+    
+    # Get the project namespace from config or ask user
+    if [ -z "$PROJECT_NAMESPACE" ] && [ -f "$CONFIG_FILE" ] && grep -q "PROJECT_NAMESPACE" "$CONFIG_FILE"; then
+        source "$CONFIG_FILE"
+    fi
+    
+    if [ -z "$PROJECT_NAMESPACE" ]; then
+        log "Available namespaces (look for your project slug):"
+        kubectl get namespaces
+        read -p "Enter your project namespace/slug: " PROJECT_NAMESPACE
+        
+        if [ -z "$PROJECT_NAMESPACE" ]; then
+            error "Project namespace cannot be empty."
+        fi
+        
+        if ! kubectl get namespace "$PROJECT_NAMESPACE" &>/dev/null; then
+            error "Namespace $PROJECT_NAMESPACE does not exist."
+        fi
+    fi
+    
+    log "Using project namespace: $PROJECT_NAMESPACE"
+    
+    # Find all secrets in the namespace
+    log "Secrets in namespace $PROJECT_NAMESPACE:"
+    kubectl get secrets -n $PROJECT_NAMESPACE
+    
+    # Find superuser secret
+    HCD_SECRETS=$(kubectl get secrets -n $PROJECT_NAMESPACE | grep -i superuser | awk '{print $1}')
+    
+    if [ -z "$HCD_SECRETS" ]; then
+        log "No superuser secret found. Please enter the name of the superuser secret:"
+        read -p "Secret name: " HCD_SECRET
+    elif [[ $(echo "$HCD_SECRETS" | wc -l) -gt 1 ]]; then
+        log "Multiple potential superuser secrets found:"
+        echo "$HCD_SECRETS"
+        read -p "Enter the name of the superuser secret: " HCD_SECRET
+    else
+        HCD_SECRET=$HCD_SECRETS
+        log "Found superuser secret: $HCD_SECRET"
+    fi
+    
+    if [ -z "$HCD_SECRET" ]; then
+        error "Superuser secret name cannot be empty."
+    fi
+    
+    # Get username and password
+    log "Retrieving credentials from secret $HCD_SECRET..."
+    USERNAME=$(kubectl get secret $HCD_SECRET -n $PROJECT_NAMESPACE -o jsonpath='{.data.username}' 2>/dev/null | base64 -d)
+    PASSWORD=$(kubectl get secret $HCD_SECRET -n $PROJECT_NAMESPACE -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
+    
+    if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+        warning "Failed to retrieve credentials from secret $HCD_SECRET."
+        log "Available data keys in the secret:"
+        kubectl get secret $HCD_SECRET -n $PROJECT_NAMESPACE -o jsonpath='{.data}' | jq
+        
+        log "Please enter the correct key names for username and password:"
+        read -p "Username key (default: username): " USERNAME_KEY
+        USERNAME_KEY=${USERNAME_KEY:-username}
+        read -p "Password key (default: password): " PASSWORD_KEY
+        PASSWORD_KEY=${PASSWORD_KEY:-password}
+        
+        USERNAME=$(kubectl get secret $HCD_SECRET -n $PROJECT_NAMESPACE -o jsonpath="{.data.$USERNAME_KEY}" 2>/dev/null | base64 -d)
+        PASSWORD=$(kubectl get secret $HCD_SECRET -n $PROJECT_NAMESPACE -o jsonpath="{.data.$PASSWORD_KEY}" 2>/dev/null | base64 -d)
+        
+        if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            error "Failed to retrieve credentials with the provided keys."
+        fi
+    fi
+    
+    log "Successfully retrieved HCD credentials:"
+    log "Username: $USERNAME"
+    log "Password: $PASSWORD"
+    
+    # Save credentials to config file
+    echo "HCD_USERNAME=$USERNAME" >> $CONFIG_FILE
+    echo "HCD_PASSWORD=$PASSWORD" >> $CONFIG_FILE
+    
+    # Find Cassandra pods
+    log "Looking for Cassandra pods in namespace $PROJECT_NAMESPACE..."
+    CASS_PODS=$(kubectl get pods -n $PROJECT_NAMESPACE | grep -iE '(hcd|cassandra).*rack.*sts' | awk '{print $1}')
+    
+    if [ -z "$CASS_PODS" ]; then
+        log "No Cassandra pods found."
+        return
+    fi
+    
+    log "Found Cassandra pods:"
+    echo "$CASS_PODS"
+    
+    # Select a pod for connection
+    if [[ $(echo "$CASS_PODS" | wc -l) -gt 1 ]]; then
+        read -p "Enter the name of the pod to connect to: " CASS_POD
+    else
+        CASS_POD=$CASS_PODS
+    fi
+    
+    if [ -z "$CASS_POD" ]; then
+        log "No pod selected. Skipping connection."
+        return
+    fi
+    
+    # Offer to connect to the pod
+    log "Would you like to connect to the Cassandra pod $CASS_POD? (y/n)"
+    read CONNECT_TO_POD
+    if [[ "$CONNECT_TO_POD" == "y" || "$CONNECT_TO_POD" == "Y" ]]; then
+        log "Connecting to pod $CASS_POD..."
+        log "When connected, you can run:"
+        log "nodetool -u $USERNAME -pw $PASSWORD status"
+        log "cqlsh -u $USERNAME -p $PASSWORD"
+        log ""
+        kubectl exec -it $CASS_POD -n $PROJECT_NAMESPACE -- bash
+    else
+        log "You can connect to the pod later with:"
+        log "kubectl exec -it $CASS_POD -n $PROJECT_NAMESPACE -- bash"
+        log ""
+        log "Then run these commands:"
+        log "nodetool -u $USERNAME -pw $PASSWORD status"
+        log "cqlsh -u $USERNAME -p $PASSWORD"
+    fi
+}
+
+# Add post-installation setup for HCD
+hcd_post_installation() {
+    log "HCD Post-Installation Setup"
+    log "==========================="
+    
+    log "Select an action:"
+    echo "1. Expose Data API as LoadBalancer"
+    echo "2. Retrieve HCD superuser credentials"
+    echo "3. Do both (recommended)"
+    echo "4. Return to main menu"
+    
+    read -p "Enter your choice [1-4]: " POST_INSTALL_CHOICE
+    
+    case $POST_INSTALL_CHOICE in
+        1)
+            expose_data_api
+            ;;
+        2)
+            get_hcd_credentials
+            ;;
+        3)
+            expose_data_api
+            get_hcd_credentials
+            ;;
+        4)
+            return
+            ;;
+        *)
+            warning "Invalid choice. Returning to main menu."
+            ;;
+    esac
 }
 
 # Show the menu
 show_menu() {
     echo -e "\n${BLUE}Mission Control Installation Menu${NC}"
     echo "1. Start or resume installation"
-    echo "2. Delete environment"
-    echo "3. Exit"
-    read -p "Enter your choice [1-3]: " MENU_CHOICE
+    echo "2. Install/Configure HCD Cluster" 
+    echo "3. HCD Post-Installation Setup"
+    echo "4. Delete environment"
+    echo "5. Exit"
+    read -p "Enter your choice [1-5]: " MENU_CHOICE
     
     case $MENU_CHOICE in
         1)
             start_or_resume_installation
             ;;
         2)
-            delete_environment
+            install_hcd_cluster
             ;;
         3)
+            hcd_post_installation
+            ;;
+        4)
+            delete_environment
+            ;;
+        5)
             log "Exiting script."
             exit 0
             ;;

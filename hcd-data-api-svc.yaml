@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    k8ssandra.io/resource-hash: vvHiemkoey1ReYkNatEHZTGEkf4ZIuTPMBTRiEcMfd4=
+  creationTimestamp: "2025-04-07T16:06:32Z"
+  labels:
+    app.kubernetes.io/name: data-api
+    app.kubernetes.io/part-of: missioncontrol
+    cassandra.datastax.com/datacenter: gcp
+    missioncontrol.datastax.com/cluster-name: hcd
+    missioncontrol.datastax.com/cluster-namespace: dambor-763us52d
+  name: hcd-gcp-data-api-service
+  namespace: dambor-763us52d
+  ownerReferences:
+  - apiVersion: cassandra.datastax.com/v1beta1
+    kind: CassandraDatacenter
+    name: hcd-gcp
+    uid: 40a7ef80-151e-496a-a41e-fa67623bb826
+  resourceVersion: "2869083"
+  uid: 42e56cb7-c445-445c-9b1f-89a6ba7bcd5f
+spec:
+  clusterIP: 10.107.248.94
+  clusterIPs:
+  - 10.107.248.94
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: http
+    port: 8181
+    protocol: TCP
+    targetPort: 8181
+  selector:
+    app.kubernetes.io/name: data-api
+    app.kubernetes.io/part-of: missioncontrol
+    cassandra.datastax.com/datacenter: gcp
+    missioncontrol.datastax.com/cluster-name: hcd
+    missioncontrol.datastax.com/cluster-namespace: dambor-763us52d
+  sessionAffinity: None
+  type: LoadBalancer
+status:
+  loadBalancer: {}
