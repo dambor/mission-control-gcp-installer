@@ -3,3 +3,4 @@ terraform/.terraform*
 terraform/terraform.tfstate*
 *.swp
 *~
+DataStax [sf_0011500001MFSiqAAH].yaml
