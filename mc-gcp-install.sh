@@ -921,116 +921,100 @@ install_hcd_cluster() {
     log "Enter a name for your HCD cluster (default: hcd):"
     read -p "HCD Cluster Name: " HCD_NAME
     HCD_NAME=${HCD_NAME:-hcd}
+
+    # Prompt for the Datacenter name
+    log "Enter a name for the Datacenter:"
+    read -p "Datacenter Name: " DC_NAME
+    #DC_NAME=${DC_NAME:}
     
+    # Prompt for the Racks name
+    #log "Enter 
+
     # Before creating the HCD cluster YAML
-    log "We need to add labels to nodes for HCD to schedule properly..."
-    add_hcd_node_labels
+    #log "We need to add labels to nodes for HCD to schedule properly..."
+    #add_hcd_node_labels
 
     # Create HCD cluster YAML file
     log "Creating HCD cluster configuration..."
     
-    cat > hcd-mission-control-cluster.yaml << EOF
+    cat > ${HCD_NAME}-mission-control-cluster.yaml << EOF
 apiVersion: missioncontrol.datastax.com/v1beta2
 kind: MissionControlCluster
 metadata:
   name: ${HCD_NAME}
   namespace: ${PROJECT_NAMESPACE}
 spec:
-  dataApi:
-      enabled: true
-      port: 8181
+  createIssuer: true
+  dataApi: 
+    enabled: true
+    port: 8181
   createIssuer: true
   encryption:
     internodeEncryption:
       certs:
-        certTemplate:
-          issuerRef:
-            name: ""
-          secretName: ""
-        createCerts: true
-      enabled: true
-    managementApiAuthEncryption:
-      certs:
-        certTemplate:
-          issuerRef:
-            name: ""
-          secretName: ""
         createCerts: true
       enabled: true
   k8ssandra:
     auth: true
     cassandra:
-      containers:
-      - env:
-        - name: DSE_AUTO_CONF_OFF
-          value: all
-        - name: DSE_MGMT_EXPLICIT_START
-          value: "true"
-        name: cassandra
-        resources: {}
+      config:
+        cassandraYaml: {}
+        dseYaml: {}
+        jvmOptions:
+          gc: G1GC
+          heapSize: 1Gi
       datacenters:
-      - datacenterName: gcp
-        metadata:
-          name: ${HCD_NAME}-gcp
-          pods: {}
-          services:
-            additionalSeedService: {}
-            allPodsService: {}
-            dcService: {}
-            nodePortService: {}
-            seedService: {}
-        perNodeConfigInitContainerImage: mikefarah/yq:4
-        perNodeConfigMapRef: {}
-        racks:
-        - name: rack1
-          nodeAffinityLabels:
-            mission-control.datastax.com/role: database
-        - name: rack2
-          nodeAffinityLabels:
-            mission-control.datastax.com/role: database
-        - name: rack3
-          nodeAffinityLabels:
-            mission-control.datastax.com/role: database
-        size: 3
-        stopped: false
-        storageConfig:
-          cassandraDataVolumeClaimSpec:
-            accessModes:
-            - ReadWriteOnce
-            resources:
-              requests:
-                storage: 1Ti
-            storageClassName: premium-rwo
-      metadata:
-        pods: {}
-        services:
-          additionalSeedService: {}
-          allPodsService: {}
-          dcService: {}
-          nodePortService: {}
-          seedService: {}
-      networking:
-        hostNetwork: false
-      perNodeConfigInitContainerImage: mikefarah/yq:4
+        - config:
+            cassandraYaml: {}
+            dseYaml: {}
+          datacenterName: ${DC_NAME}
+          dseWorkloads: {}
+          metadata:
+            name: ${DC_NAME}
+            pods: {}
+            services:
+              additionalSeedService: {}
+              allPodsService: {}
+              dcService: {}
+              nodePortService: {}
+              seedService: {}
+          networking: {}
+          perNodeConfigMapRef: {}
+          racks:
+            - name: rack1
+              nodeAffinityLabels: {}
+            - name: rack2
+              nodeAffinityLabels: {}
+            - name: rack3
+              nodeAffinityLabels: {}
+          size: 3
       resources:
         requests:
-          cpu: "1"
-          memory: 2Gi
+          cpu: 1000m
+          memory: 4Gi
       serverType: hcd
       serverVersion: 1.1.0
-      superuserSecretRef: {}
-    secretsProvider: internal
+      storageConfig:
+        cassandraDataVolumeClaimSpec:
+          accessModes:
+          - ReadWriteOnce
+          resources:
+            requests:
+              storage: 8Gi
+          storageClassName: standard
+      superuserSecretRef:
+        name: hcd-superuser
 EOF
-    
+
     # Apply the HCD cluster configuration
     log "Applying HCD cluster configuration..."
-    kubectl apply -f hcd-mission-control-cluster.yaml
+    kubectl apply -f ${HCD_NAME}-mission-control-cluster.yaml
     
     if [ $? -ne 0 ]; then
         warning "Failed to apply HCD cluster configuration."
         read -p "Would you like to retry? (y/n): " RETRY_HCD
         if [[ "$RETRY_HCD" == "y" || "$RETRY_HCD" == "Y" ]]; then
-            kubectl apply -f hcd-mission-control-cluster.yaml
+            kubectl apply -f ${HCD_NAME}-mission-control-cluster.yaml
             if [ $? -ne 0 ]; then
                 error "Failed to apply HCD cluster configuration after retry."
             fi
