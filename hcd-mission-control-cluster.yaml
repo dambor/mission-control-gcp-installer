@@ -2,7 +2,7 @@ apiVersion: missioncontrol.datastax.com/v1beta2
 kind: MissionControlCluster
 metadata:
   name: hcd
-  namespace: dambor-763us52d
+  namespace: sample-742pi4i6
 spec:
   dataApi:
       enabled: true
